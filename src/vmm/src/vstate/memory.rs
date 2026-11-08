@@ -1382,7 +1382,13 @@ impl GuestMemoryExtension for GuestMemoryMmap {
 
     fn discard_range(&self, addr: GuestAddress, range_len: usize) -> Result<(), GuestMemoryError> {
         self.try_for_each_region_in_range(addr, range_len, |region, start, len| {
-            region.discard_range(start, len)
+            region.discard_range(start, len)?;
+            // The range now reads as zeros, but the guest did not write them, so KVM's dirty
+            // log does not see the change. Without marking it here, a diff snapshot would
+            // leave the range out, and a snapshot the diff is merged into would keep the
+            // range's old contents.
+            self.mark_dirty(region.start_addr().unchecked_add(start.raw_value()), len);
+            Ok(())
         })
     }
 
@@ -2163,6 +2169,43 @@ mod tests {
                 .unwrap_err(),
             GuestMemoryError::InvalidGuestAddress(_)
         );
+    }
+
+    #[test]
+    fn test_discard_range_marks_dirty() {
+        let page_size = host_page_size();
+        let mem = into_region_ext(
+            anonymous(
+                &[(GuestAddress(0), 2 * page_size)],
+                true,
+                HugePageConfig::None,
+            )
+            .unwrap(),
+        );
+        mem.write(&vec![1u8; 2 * page_size], GuestAddress(0))
+            .unwrap();
+        // KVM saw no guest writes; the pages are dirty in Firecracker's own bitmap.
+        let kvm_dirty_bitmap: DirtyBitmap = HashMap::from([(0, vec![0])]);
+
+        // A snapshot holding the ones, which leaves every page clean.
+        let mut snapshot = TempFile::new().unwrap().into_file();
+        mem.dump_dirty(&mut snapshot, &kvm_dirty_bitmap).unwrap();
+        let region = mem.iter().next().unwrap();
+        assert!(!region.bitmap().dirty_at(0));
+        assert!(!region.bitmap().dirty_at(page_size));
+
+        // The guest gives the first page back, as the balloon device discards it.
+        mem.discard_range(GuestAddress(0), page_size).unwrap();
+        assert!(region.bitmap().dirty_at(0));
+        assert!(!region.bitmap().dirty_at(page_size));
+
+        // A diff merged into the snapshot holds zeros there, as the guest reads now.
+        snapshot.seek(SeekFrom::Start(0)).unwrap();
+        mem.dump_dirty(&mut snapshot, &kvm_dirty_bitmap).unwrap();
+        let mut merged = vec![0u8; 2 * page_size];
+        snapshot.read_exact_at(&mut merged, 0).unwrap();
+        assert_eq!(merged[..page_size], vec![0u8; page_size]);
+        assert_eq!(merged[page_size..], vec![1u8; page_size]);
     }
 
     #[test]

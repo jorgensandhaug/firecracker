@@ -96,6 +96,12 @@ and this project adheres to
 
 ### Fixed
 
+- [#XXXX](https://github.com/firecracker-microvm/firecracker/pull/XXXX): Fixed
+  diff snapshots leaving out guest memory that the balloon device discarded
+  (inflation, free page hinting or free page reporting). The guest reads zeros
+  there after the discard, but the discard was not counted as a change, so a
+  snapshot the diff was merged into kept that memory's previous contents.
+
 - [#6302](https://github.com/firecracker-microvm/firecracker/issues/6302): Fixed
   AMX tile state being lost after a snapshot restore. The IA32_XFD and
   IA32_XFD_ERR MSRs are now saved in snapshots. Without them a restored guest
